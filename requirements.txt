@@ -5,3 +5,4 @@ streamlit
 langchain_community
 langserve
 PyPDF2
+SpeechRecognition
