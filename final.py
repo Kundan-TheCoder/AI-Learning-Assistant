@@ -1,19 +1,21 @@
-
 import json
 import streamlit as st
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
-from langchain_community.llms import Ollama
 import os
 from dotenv import load_dotenv
 import PyPDF2
 import speech_recognition as sr
+from langchain_groq import ChatGroq  # Import Groq API for Langchain
 
 # Set Streamlit page configuration as the first Streamlit command
 st.set_page_config(page_title="Personalized Learning Assistant", page_icon=":books:", layout="wide")
 
 # Load environment variables
 load_dotenv()
+
+# Groq API key from environment variables
+groq_api_key = os.getenv("GROQ_API")
 
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY")
@@ -71,14 +73,25 @@ def add_custom_css():
 def render_symbols(symbol):
     st.markdown(f"<h1 style='text-align: center;'>{symbol}</h1>", unsafe_allow_html=True)
 
-# Prompt Template
-def get_prompt(conversation_history):
-    messages = [("system", "You are a helpful assistant. Please respond to the user's queries.")]
-    for user_msg, assistant_msg in conversation_history:
-        messages.append(("user", f"Question: {user_msg}"))
-        messages.append(("assistant", assistant_msg))
-    return ChatPromptTemplate.from_messages(messages)
+# Load the Groq model
+def load_model():
+    llm = ChatGroq(
+        model="llama3-8b-8192",
+        groq_api_key=groq_api_key,
+        temperature=0,
+        max_tokens=None,
+        timeout=None,
+        max_retries=2
+    )
+    return llm
 
+# Prompt Template
+def get_prompt():
+    return ChatPromptTemplate.from_messages([
+        ("system", "You are a helpful assistant. Please respond to the user's queries."),
+        MessagesPlaceholder(variable_name="history"),
+        ("human", "{input}")
+    ])
 # Function to extract text from PDF
 def extract_text_from_pdf(pdf_file):
     pdf_reader = PyPDF2.PdfReader(pdf_file)
@@ -144,41 +157,53 @@ input_text = st.text_input("Enter your question below ⌨:")
 if use_voice_input and st.button("🎤 Record and Submit"):
     input_text = recognize_speech()
 
-# Ollama LLaMA2 LLM 
-llm = Ollama(model="llama2")
-output_parser = StrOutputParser()
+# Load the Groq LLM
+llm = load_model()
 
 # When user enters a question
 if input_text:
     # Search PDF text
     if pdf_text and input_text.lower() in pdf_text.lower():
         st.write("### Found in PDF: 📚")
-        st.write(f"*Query:* {input_text} was found in the uploaded PDF.")
+        st.write(f"Query: {input_text} was found in the uploaded PDF.")
         st.session_state.generated_text = pdf_text
     else:
-        # Add user input to conversation history
-        st.session_state.conversation_history.append((input_text, ""))
-        
-        # Get the prompt with conversation history
-        prompt = get_prompt(st.session_state.conversation_history)
-        
+        # Get the prompt template
+        prompt = get_prompt()
+
+        # Format the messages with the conversation history and current input
+        messages = prompt.format_messages(
+            history=st.session_state.conversation_history,
+            input=input_text
+        )
+
         # Generate response
-        chain = prompt | llm | output_parser
-        assistant_response = chain.invoke({"question": input_text})  # Use invoke() instead of run()
-        
+        assistant_response = llm.invoke(messages)
+
         # Update conversation history with assistant response
-        st.session_state.conversation_history[-1] = (input_text, assistant_response)
-        
+        st.session_state.conversation_history.append(
+            {"role": "human", "content": input_text}
+        )
+        st.session_state.conversation_history.append(
+            {"role": "assistant", "content": assistant_response.content}
+        )
+
         # Store the generated text
-        st.session_state.generated_text = assistant_response
+        st.session_state.generated_text = assistant_response.content
 
     # Display the conversation
     st.write("### Conversation History 🗣")
     with st.expander("Expand to view the conversation history 📜", expanded=True):
-        for user_msg, assistant_msg in st.session_state.conversation_history:
-            st.markdown(f"*You:* {user_msg} 🤔")
-            st.markdown(f"*Assistant:* {assistant_msg} 💬")
+        for message in st.session_state.conversation_history:
+            if message["role"] == "human":
+                st.markdown(f"You: {message['content']} 🤔")
+            else:
+                st.markdown(f"Assistant: {message['content']} 💬")
             st.markdown("---")
+
+# Initialize conversation history if it doesn't exist
+if 'conversation_history' not in st.session_state:
+    st.session_state.conversation_history = []
 
 # Generate MCQs if the option is selected and there is generated text
 if generate_mcqs and st.session_state.generated_text:
@@ -193,30 +218,18 @@ Format the entire output as HTML code for a webpage.
 - Questions:
     <Question1>: <a. Answer 1>, <b. Answer 2>, <c. Answer 3>, <d. Answer 4>
     <Question2>: <a. Answer 1>, <b. Answer 2>, <c. Answer 3>, <d. Answer 4>
-    ....
+    .....
 - Answers:
     <Answer1>: <a|b|c|d>
     <Answer2>: <a|b|c|d>
-    ....
-    Example:
-    - Questions:
-    - 1. What is the time complexity of a binary search tree?
-        a. O(n)
-        b. O(log n)
-        c. O(n^2)
-        d. O(1)
-    - Answers: 
-        1. b
-
-    Please return only the HTML code that includes all 10 MCQs and a submit button at last to submit all the answers of above mcqs.
-    ....
+    .....
 """
 
-        # Proceed with generating the MCQs using the LLM and saving the HTML
-        mcq_chain = ChatPromptTemplate.from_messages([("user", mcq_prompt)]) | llm | output_parser
-        
+        # Proceed with generating the MCQs using the Groq LLM and saving the HTML
+        mcq_chain = ChatPromptTemplate.from_messages([("user", mcq_prompt)]) | llm | StrOutputParser()
+
         # Execute the mcq_chain to get the result
-        generated_mcqs = mcq_chain.invoke({"input": mcq_prompt})  # Pass the required input
+        generated_mcqs = mcq_chain.invoke({"input": mcq_prompt})
 
         # Save the generated MCQs to an HTML file
         with open('generated_mcqs.html', 'w') as file:
